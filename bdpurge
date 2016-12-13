@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+# \brief Erases data on a block device
+# \param $1 The mode: quick or full
+# \param $2 The device
+function codename_purge
+{
+	local MODE="$1"
+	local DEVICE="$2"
+	
+	if [ ! -b "$DEVICE" ]; then
+		echo "error: \"$DEVICE\" is not a block device"
+		return 1
+	fi
+	if mount | grep "$DEVICE"; then
+		echo "error: \"$DEVICE\" is currently mounted"
+		return 2
+	fi
+	local DEVICE_MODEL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Model Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
+	local DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
+	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
+	local DEVICE_BLOCKS=$(($DEVICE_SIZE / 512))
+	
+	if [ "$MODE" = "quick" ]; then
+		echo "Erasing the first and last 16MiB on:"
+		echo "  Device: $DEVICE"
+		if [ "$DEVICE_MODEL" != "" ]; then
+			echo "  Model Number: $DEVICE_MODEL"
+		fi
+		if [ "$DEVICE_SERIAL" != "" ]; then
+			echo "  Serial Number: $DEVICE_SERIAL"
+		fi
+		echo "  Size: $DEVICE_SIZE Bytes"
+		echo "Press CTRL+C to cancel"
+		for SECONDS in `seq 10 -1 1`; do
+			printf "\r${SECONDS} ... "
+			sleep 1
+		done
+		printf "\r0 ... \n"
+		
+		dd if=/dev/zero bs=512 count=2048 of="$DEVICE"
+		dd if=/dev/zero bs=512 count=2048 of="$DEVICE" seek=$(( $DEVICE_BLOCKS - 2048 ))
+	elif [ "$MODE" = "full" ]; then
+		echo "full mode not implemented"
+		return 2		
+	else
+		echo "Unknown mode: \"$MODE\""
+		return 1
+	fi
+}
+
+codename_purge quick "$1"
