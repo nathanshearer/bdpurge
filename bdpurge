@@ -6,6 +6,18 @@ COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
 VERSION="0.0.0.0"
 
+# \brief Ensures dependencies are present
+# \param $@ The dependencies to check for
+function bdpurge_check_dependencies
+{
+	for TOOL in "$@"; do
+		if ! type "$TOOL" >/dev/null 2>/dev/null; then
+			echo "$CODENAME: \"$TOOL\" is required for this application to work correctly." >&2
+			exit
+		fi
+	done
+}
+
 # \brief Displays the help and exits the program
 function bdpurge_help
 {
@@ -44,7 +56,7 @@ function bdpurge_main
 		echo "error: \"$DEVICE\" is not a block device"
 		return 1
 	fi
-	if mount | grep "$DEVICE"; then
+	if mount | grep "$DEVICE" >/dev/null; then
 		echo "error: \"$DEVICE\" is currently mounted"
 		return 2
 	fi
