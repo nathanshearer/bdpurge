@@ -1,32 +1,36 @@
 #!/usr/bin/env bash
 
-#----------------------------------------------------------------------------
-# bdpurge
-# Copyright (C) 2016 Nathan Shearer
-#
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License version 2 as published by
-# the Free Software Foundation.
-#
-# This program is distributed in the hope that it will be useful, but WITHOUT
-# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-# more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to:
-#   The Free Software Foundation Inc.
-#   51 Franklin Street
-#   Fifth Floor
-#   Boston, MA
-#   02110-1301
-#   USA
-
 NAME="bdpurge"
 CODENAME="bdpurge"
 COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
 VERSION="0.0.0.0"
+
+# \brief Displays the help and exits the program
+function bdpurge_help
+{
+	#     01234567890123456789012345678901234567890123456789012345678901234567890123456789
+	echo "Synopsis:"
+	echo "  Erase a block device"
+	echo
+	echo "Usage:"
+	echo "  $CODENAME [options] BLOCK_DEVICE"
+	echo
+	echo "Options:"
+	echo "  -h, --help"
+	echo "    Display this help message and exit."
+	echo "  -n N"
+	echo "    Sets the niceness to N (default 0)."
+	echo
+	echo "Examples:"
+	echo "  $CODENAME /dev/disk/by-id/ata-ST8000AS0002-1NA17Z_00000000"
+	echo
+	echo "Version:"
+	echo "  $NAME $VERSION"
+	echo "  $COPYRIGHT"
+	echo "  Licensed under $LICENSE"
+	exit;
+}
 
 # \brief Erases data on a block device
 # \param $1 The mode: quick or full
@@ -76,5 +80,64 @@ function bdpurge_main
 		return 1
 	fi
 }
+
+#------------------------------------------------------------------------------
+# default configuration
+#
+NICE=0
+
+#------------------------------------------------------------------------------
+# config files
+#
+if [ -r /etc/$CODENAME.conf ]; then
+	. /etc/$CODENAME.conf
+fi
+if [ -r ~/.$CODENAME.conf ]; then
+	. ~/.$CODENAME.conf
+fi
+
+#------------------------------------------------------------------------------
+# command line arguments
+#
+
+if [ $# -eq 0 ]; then
+	bdpurge_help
+	exit 1
+fi
+
+THIS="$0"
+while [ $# -ne 0 ]; do
+	case "$1" in
+		"-h"|"--help")
+			bdpurge_help
+			exit
+			;;
+		"-n")
+			NICE="$2"
+			shift 2
+			;;
+		*)
+			break;;
+	esac
+done
+
+if [ $# -eq 0 ]; then
+	echo "error: Missing BLOCK_DEVICE argument."
+	exit 1
+fi
+if [ $# -gt 1 ]; then
+	bdbusy_help
+	exit 1
+fi
+DEVICE="$1"
+
+#------------------------------------------------------------------------------
+# prepare environment
+
+bdpurge_check_dependencies blockdev dd sleep
+renice $NICE $$ >/dev/null
+
+#------------------------------------------------------------------------------
+# begin execution
 
 bdpurge_main quick "$1"
