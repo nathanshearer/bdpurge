@@ -4,7 +4,7 @@ NAME="bdpurge"
 CODENAME="bdpurge"
 COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
-VERSION="0.0.0.0"
+VERSION="1.0.0.0"
 
 # \brief Ensures dependencies are present
 # \param $@ The dependencies to check for
@@ -18,11 +18,29 @@ function bdpurge_check_dependencies
 	done
 }
 
+# \brief Erases data on a block device
+# \param $1 The device
+# \param $2 The amount of data to erase at both ends of the device
+function bdpurge_erase
+{
+	local DEVICE="$1"
+	local PURGE_SIZE="$2"
+	
+	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
+	
+	if [ $(($PURGE_SIZE*2)) -ge "$DEVICE_SIZE" ]; then
+		$PRETEND dd if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE"
+	else
+		$PRETEND dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
+		$PRETEND dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
+	fi
+}
+
 # \brief Displays the help and exits the program
 function bdpurge_help
 {
 	#     01234567890123456789012345678901234567890123456789012345678901234567890123456789
-	echo "Synopsis:"
+	echo "Description:"
 	echo "  Erase a block device"
 	echo
 	echo "Usage:"
@@ -33,9 +51,16 @@ function bdpurge_help
 	echo "    Display this help message and exit."
 	echo "  -n N"
 	echo "    Sets the niceness to N (default 0)."
+	echo "  -p, --pretend"
+	echo "    Performs a dry run and prints out what purge commands would be performed."
+	echo "    Data is not actually purged."
+	echo "  -r, --recursive"
+	echo "    Purge each partition before purging the entire block device."
+	echo "  -s, --size 16777216"
+	echo "    The amount of data to erase at both ends of the block device."
 	echo
 	echo "Examples:"
-	echo "  $CODENAME /dev/disk/by-id/ata-ST8000AS0002-1NA17Z_00000000"
+	echo "  $CODENAME -r -p /dev/disk/by-id/ata-ST8000AS0002-1NA17Z_00000000"
 	echo
 	echo "Version:"
 	echo "  $NAME $VERSION"
@@ -45,12 +70,10 @@ function bdpurge_help
 }
 
 # \brief Erases data on a block device
-# \param $1 The mode: quick or full
-# \param $2 The device
+# \param $1 The device
 function bdpurge_main
 {
-	local MODE="$1"
-	local DEVICE="$2"
+	local DEVICE="$1"
 	
 	if [ ! -b "$DEVICE" ]; then
 		echo "error: \"$DEVICE\" is not a block device"
@@ -60,43 +83,44 @@ function bdpurge_main
 		echo "error: \"$DEVICE\" is currently mounted"
 		return 2
 	fi
+	
 	local DEVICE_MODEL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Model Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
 	local DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
-	local DEVICE_BLOCKS=$(($DEVICE_SIZE / 512))
 	
-	if [ "$MODE" = "quick" ]; then
-		echo "Erasing the first and last 16MiB on:"
-		echo "  Device: $DEVICE"
-		if [ "$DEVICE_MODEL" != "" ]; then
-			echo "  Model Number: $DEVICE_MODEL"
-		fi
-		if [ "$DEVICE_SERIAL" != "" ]; then
-			echo "  Serial Number: $DEVICE_SERIAL"
-		fi
-		echo "  Size: $DEVICE_SIZE Bytes"
-		echo "Press CTRL+C to cancel"
-		for SECONDS in `seq 10 -1 1`; do
-			printf "\r${SECONDS} ... "
-			sleep 1
-		done
-		printf "\r0 ... \n"
-		
-		dd if=/dev/zero bs=512 count=2048 of="$DEVICE"
-		dd if=/dev/zero bs=512 count=2048 of="$DEVICE" seek=$(( $DEVICE_BLOCKS - 2048 ))
-	elif [ "$MODE" = "full" ]; then
-		echo "full mode not implemented"
-		return 2		
-	else
-		echo "Unknown mode: \"$MODE\""
-		return 1
+	echo "Erasing the first and last $PURGE_SIZE bytes on:"
+	echo "  Device: $DEVICE"
+	if [ "$DEVICE_MODEL" != "" ]; then
+		echo "  Model Number: $DEVICE_MODEL"
 	fi
+	if [ "$DEVICE_SERIAL" != "" ]; then
+		echo "  Serial Number: $DEVICE_SERIAL"
+	fi
+	echo "  Size: $DEVICE_SIZE Bytes"
+	echo "Press CTRL+C to cancel"
+	for SECONDS in `seq 10 -1 1`; do
+		printf "\r${SECONDS} ... "
+		sleep 1
+	done
+	printf "\r0 ... \n"
+	
+	if $RECURSIVE; then
+		for PARTITION in "$DEVICE"[0-9]*; do
+			if [ "$PARTITION"='$DEVICE[0-9]*' ]; then continue; fi
+			bdpurge_erase "$PARTITION" "$PURGE_SIZE"
+		done
+	fi
+	bdpurge_erase "$DEVICE" "$PURGE_SIZE"
+	$PRETEND partprobe "$DEVICE"
 }
 
 #------------------------------------------------------------------------------
 # default configuration
 #
 NICE=0
+PRETEND=""
+PURGE_SIZE=16777216
+RECURSIVE=false
 
 #------------------------------------------------------------------------------
 # config files
@@ -128,6 +152,22 @@ while [ $# -ne 0 ]; do
 			NICE="$2"
 			shift 2
 			;;
+		"-p"|"--pretend")
+			PRETEND="echo "
+			shift
+			;;
+		"-r"|"--recursive")
+			RECURSIVE=true
+			shift
+			;;
+		"-s"|"--size")
+			PURGE_SIZE="$2"
+			if [ $(($(($PURGE_SIZE/512))*512)) -ne "$PURGE_SIZE" ]; then
+				PURGE_SIZE=$(($(($PURGE_SIZE/512))*512))
+				echo "warning: The purge size is not a multiple of 512, rounding down from $2 to $PURGE_SIZE" 
+			fi
+			shift 2
+			;;
 		*)
 			break;;
 	esac
@@ -138,7 +178,7 @@ if [ $# -eq 0 ]; then
 	exit 1
 fi
 if [ $# -gt 1 ]; then
-	bdbusy_help
+	bdpurge_help
 	exit 1
 fi
 DEVICE="$1"
@@ -146,10 +186,10 @@ DEVICE="$1"
 #------------------------------------------------------------------------------
 # prepare environment
 
-bdpurge_check_dependencies blockdev dd sleep
+bdpurge_check_dependencies blockdev dd partprobe sleep
 renice $NICE $$ >/dev/null
 
 #------------------------------------------------------------------------------
 # begin execution
 
-bdpurge_main quick "$1"
+bdpurge_main "$1"
