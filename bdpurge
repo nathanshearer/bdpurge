@@ -4,7 +4,7 @@ NAME="bdpurge"
 CODENAME="bdpurge"
 COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
-VERSION="1.0.0.0"
+VERSION="1.0.1.0"
 
 # \brief Ensures dependencies are present
 # \param $@ The dependencies to check for
@@ -26,13 +26,31 @@ function bdpurge_erase
 	local DEVICE="$1"
 	local PURGE_SIZE="$2"
 	
+	echo -n "Erasing the first and last $PURGE_SIZE bytes on \"$DEVICE\"..."
+	
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	
 	if [ $(($PURGE_SIZE*2)) -ge "$DEVICE_SIZE" ]; then
-		$PRETEND dd if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE"
+		if $PRETEND; then
+			echo
+			echo dd status=none if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE" >/dev/null 2>/dev/null
+		else
+			dd status=none if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE" >/dev/null 2>/dev/null
+		fi
 	else
-		$PRETEND dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
-		$PRETEND dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
+		if $PRETEND; then
+			echo
+			echo dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
+			echo dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
+		else
+			dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
+			dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
+		fi
+
+	fi
+	
+	if ! $PRETEND; then
+		echo " done."
 	fi
 }
 
@@ -66,7 +84,7 @@ function bdpurge_help
 	echo "  $NAME $VERSION"
 	echo "  $COPYRIGHT"
 	echo "  Licensed under $LICENSE"
-	exit;
+	exit
 }
 
 # \brief Erases data on a block device
@@ -88,7 +106,7 @@ function bdpurge_main
 	local DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	
-	echo "Erasing the first and last $PURGE_SIZE bytes on:"
+	echo "Erasing:"
 	echo "  Device: $DEVICE"
 	if [ "$DEVICE_MODEL" != "" ]; then
 		echo "  Model Number: $DEVICE_MODEL"
@@ -106,19 +124,23 @@ function bdpurge_main
 	
 	if $RECURSIVE; then
 		for PARTITION in "$DEVICE"[0-9]*; do
-			if [ "$PARTITION"='$DEVICE[0-9]*' ]; then continue; fi
+			if [ "$PARTITION" = '$DEVICE[0-9]*' ]; then continue; fi
 			bdpurge_erase "$PARTITION" "$PURGE_SIZE"
 		done
 	fi
 	bdpurge_erase "$DEVICE" "$PURGE_SIZE"
-	$PRETEND partprobe "$DEVICE"
+	if $PRETEND; then
+		echo partprobe "$DEVICE"
+	else
+		partprobe "$DEVICE"
+	fi
 }
 
 #------------------------------------------------------------------------------
 # default configuration
 #
 NICE=0
-PRETEND=""
+PRETEND=false
 PURGE_SIZE=16777216
 RECURSIVE=false
 
@@ -153,7 +175,7 @@ while [ $# -ne 0 ]; do
 			shift 2
 			;;
 		"-p"|"--pretend")
-			PRETEND="echo "
+			PRETEND=true
 			shift
 			;;
 		"-r"|"--recursive")
