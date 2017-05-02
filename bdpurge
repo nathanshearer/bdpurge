@@ -123,8 +123,9 @@ function bdpurge_main
 	printf "\r0 ... \n"
 	
 	if $RECURSIVE; then
-		for PARTITION in "$DEVICE"[0-9]*; do
-			if [ "$PARTITION" = '$DEVICE[0-9]*' ]; then continue; fi
+		for PARTITION in "$DEVICE"[0-9]* "$DEVICE"p[0-9]*; do
+			if [ "$PARTITION" = "${DEVICE}[0-9]*" ]; then continue; fi
+			if [ "$PARTITION" = "${DEVICE}p[0-9]*" ]; then continue; fi
 			bdpurge_erase "$PARTITION" "$PURGE_SIZE"
 		done
 	fi
