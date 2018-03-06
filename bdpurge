@@ -65,6 +65,8 @@ function bdpurge_help
 	echo "  $CODENAME [options] BLOCK_DEVICE"
 	echo
 	echo "Options:"
+	echo "  -f, --force"
+	echo "    Erase the block device even if it is mounted."
 	echo "  -h, --help"
 	echo "    Display this help message and exit."
 	echo "  -n N"
@@ -97,7 +99,7 @@ function bdpurge_main
 		echo "error: \"$DEVICE\" is not a block device"
 		return 1
 	fi
-	if mount | grep "$DEVICE" >/dev/null; then
+	if ! $FORCE && mount | grep "$DEVICE" >/dev/null; then
 		echo "error: \"$DEVICE\" is currently mounted"
 		return 2
 	fi
@@ -140,6 +142,7 @@ function bdpurge_main
 #------------------------------------------------------------------------------
 # default configuration
 #
+FORCE=false
 NICE=0
 PRETEND=false
 PURGE_SIZE=16777216
@@ -167,6 +170,10 @@ fi
 THIS="$0"
 while [ $# -ne 0 ]; do
 	case "$1" in
+		"-f"|"--force")
+			FORCE=true
+			shift
+			;;
 		"-h"|"--help")
 			bdpurge_help
 			exit
