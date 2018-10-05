@@ -4,7 +4,7 @@ NAME="bdpurge"
 CODENAME="bdpurge"
 COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
-VERSION="1.0.1.0"
+VERSION="2.0.0.0"
 
 # \brief Ensures dependencies are present
 # \param $@ The dependencies to check for
@@ -18,10 +18,10 @@ function bdpurge_check_dependencies
 	done
 }
 
-# \brief Erases data on a block device
+# \brief Erase data at both ends of a block device
 # \param $1 The device
-# \param $2 The amount of data to erase at both ends of the device
-function bdpurge_erase
+# \param $2 The amount of data to erase at each end
+function bdpurge_erase_quick
 {
 	local DEVICE="$1"
 	local PURGE_SIZE="$2"
@@ -54,6 +54,22 @@ function bdpurge_erase
 	fi
 }
 
+# \brief Perform a quick erase of each partition and the entire block device
+# \param $1 The device
+# \param $2 The amount of data to erase at each end
+function bdpurge_erase_quickr
+{
+	local DEVICE="$1"
+	local PURGE_SIZE="$2"
+	
+	for PARTITION in "$DEVICE"[0-9]* "$DEVICE"p[0-9]*; do
+		if [ "$PARTITION" = "${DEVICE}[0-9]*" ]; then continue; fi
+		if [ "$PARTITION" = "${DEVICE}p[0-9]*" ]; then continue; fi
+		bdpurge_erase_quick "$PARTITION" "$PURGE_SIZE"
+	done
+	bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE"
+}
+
 # \brief Displays the help and exits the program
 function bdpurge_help
 {
@@ -69,13 +85,18 @@ function bdpurge_help
 	echo "    Erase the block device even if it is mounted."
 	echo "  -h, --help"
 	echo "    Display this help message and exit."
+	echo "  -m, --method quick"
+	echo "    Set the method used to erase the block device. Default is quick:"
+	echo "      quick      Erase both ends of the device"
+	echo "      quickr     Erase both ends of each partition and the device"
+	#echo "      full       Write a sequence of zeros to the entire device"
+	#echo "      badblocks  Write 4 passes of 0xaa, 0x55, 0xff. and 0x00"
+	#echo "      scrub      Write multiple passes with data from /dev/urandom"
 	echo "  -n N"
 	echo "    Sets the niceness to N (default 0)."
 	echo "  -p, --pretend"
 	echo "    Performs a dry run and prints out what purge commands would be performed."
 	echo "    Data is not actually purged."
-	echo "  -r, --recursive"
-	echo "    Purge each partition before purging the entire block device."
 	echo "  -s, --size 16777216"
 	echo "    The amount of data to erase at both ends of the block device."
 	echo
@@ -89,9 +110,9 @@ function bdpurge_help
 	exit
 }
 
-# \brief Erases data on a block device
+# \brief Analyze a block device and display relevant information
 # \param $1 The device
-function bdpurge_main
+function bdpurge_analyze
 {
 	local DEVICE="$1"
 	
@@ -108,8 +129,7 @@ function bdpurge_main
 	local DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	
-	echo "Erasing:"
-	echo "  Device: $DEVICE"
+	echo "Device: $DEVICE"
 	if [ "$DEVICE_MODEL" != "" ]; then
 		echo "  Model Number: $DEVICE_MODEL"
 	fi
@@ -117,6 +137,21 @@ function bdpurge_main
 		echo "  Serial Number: $DEVICE_SERIAL"
 	fi
 	echo "  Size: $DEVICE_SIZE Bytes"
+}
+
+
+# \brief Erase data on a block device
+# \param $1 The device
+function bdpurge_main
+{
+	local DEVICE="$1"
+	
+	bdpurge_analyze "$DEVICE"
+	local ANALYSIS=$?
+	if [ $ANALYSIS -ne 0 ]; then
+		return $ANALYSIS
+	fi
+	
 	echo "Press CTRL+C to cancel"
 	for SECONDS in `seq 10 -1 1`; do
 		printf "\r${SECONDS} ... "
@@ -124,14 +159,28 @@ function bdpurge_main
 	done
 	printf "\r0 ... \n"
 	
-	if $RECURSIVE; then
-		for PARTITION in "$DEVICE"[0-9]* "$DEVICE"p[0-9]*; do
-			if [ "$PARTITION" = "${DEVICE}[0-9]*" ]; then continue; fi
-			if [ "$PARTITION" = "${DEVICE}p[0-9]*" ]; then continue; fi
-			bdpurge_erase "$PARTITION" "$PURGE_SIZE"
-		done
-	fi
-	bdpurge_erase "$DEVICE" "$PURGE_SIZE"
+	case "$METHOD" in
+		"quick")
+			bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE"
+			;;
+		"quickr")
+			bdpurge_erase_quickr "$DEVICE" "$PURGE_SIZE"
+			;;
+		#"full")
+			#bdpurge_erase_full
+			#;;
+		#"badblocks")
+			#bdpurge_erase_badblocks
+			#;;
+		#"scrub")
+			#bdpurge_erase_scrub
+			#;;
+		*)
+			echo "error: invalid method \"$METHOD\""
+			return 1
+			;;
+	esac
+	
 	if $PRETEND; then
 		echo partprobe "$DEVICE"
 	else
@@ -143,10 +192,10 @@ function bdpurge_main
 # default configuration
 #
 FORCE=false
+METHOD=quick
 NICE=0
 PRETEND=false
 PURGE_SIZE=16777216
-RECURSIVE=false
 
 #------------------------------------------------------------------------------
 # config files
@@ -178,16 +227,16 @@ while [ $# -ne 0 ]; do
 			bdpurge_help
 			exit
 			;;
+		"-m")
+			METHOD="$2"
+			shift 2
+			;;
 		"-n")
 			NICE="$2"
 			shift 2
 			;;
 		"-p"|"--pretend")
 			PRETEND=true
-			shift
-			;;
-		"-r"|"--recursive")
-			RECURSIVE=true
 			shift
 			;;
 		"-s"|"--size")
