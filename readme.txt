@@ -5,14 +5,17 @@ Usage:
   bdpurge [options] BLOCK_DEVICE
 
 Options:
+  -e, --email mail@example.com
+    Send an email upon completion of the badblocks method.
   -f, --force
     Erase the block device even if it is mounted.
   -h, --help
     Display this help message and exit.
   -m, --method quick
-    Set the method used to erase the block device. Default is quick:
+    Set the method used to erase the block device. Default is quickr:
       quick      Erase both ends of the device
       quickr     Erase both ends of each partition and the device
+      badblocks  Write 4 passes of 0xaa, 0x55, 0xff, and 0x00
   -n N
     Sets the niceness to N (default 0).
   -p, --pretend
@@ -25,6 +28,6 @@ Examples:
   bdpurge -r -p /dev/disk/by-id/ata-ST8000AS0002-1NA17Z_00000000
 
 Version:
-  bdpurge 2.0.0.0
+  bdpurge 2.1.0.0
   Copyright (C) 2016 Nathan Shearer
   Licensed under GNU General Public License 2.0

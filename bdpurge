@@ -1,10 +1,33 @@
 #!/usr/bin/env bash
 
-NAME="bdpurge"
-CODENAME="bdpurge"
-COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
-LICENSE="GNU General Public License 2.0"
-VERSION="2.0.0.0"
+# \brief Analyze a block device and display relevant information
+# \param $1 The device
+function bdpurge_analyze
+{
+	local DEVICE="$1"
+	
+	if [ ! -b "$DEVICE" ]; then
+		echo "error: \"$DEVICE\" is not a block device"
+		return 1
+	fi
+	if ! $FORCE && mount | grep "$DEVICE" >/dev/null; then
+		echo "error: \"$DEVICE\" is currently mounted"
+		return 2
+	fi
+	
+	local DEVICE_MODEL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Model Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
+	local DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
+	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
+	
+	echo "Device: $DEVICE"
+	if [ "$DEVICE_MODEL" != "" ]; then
+		echo "  Model Number: $DEVICE_MODEL"
+	fi
+	if [ "$DEVICE_SERIAL" != "" ]; then
+		echo "  Serial Number: $DEVICE_SERIAL"
+	fi
+	echo "  Size: $DEVICE_SIZE Bytes"
+}
 
 # \brief Ensures dependencies are present
 # \param $@ The dependencies to check for
@@ -16,6 +39,47 @@ function bdpurge_check_dependencies
 			exit
 		fi
 	done
+}
+
+# \brief Sends an email
+# \param $1 The e-mail address
+# \param $2 The subject
+# \param $3 The file containing the message
+function bdpurge_email
+{
+	if [ $# -eq 3 -a "$1" != "" ]; then
+		cat "$3" | mail -s "$2" "$1"
+	fi
+}
+
+# \brief Write 4 passes of 0xaa, 0x55, 0xff, and 0x00
+# \param $1 The device
+function bdpurge_erase_badblocks
+{
+	local DEVICE="$1"
+	
+	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
+	local BLOCK_SIZE=$(bdpurge_gcd $((2**20)) $DEVICE_SIZE)
+	
+	if $PRETEND; then
+		echo badblocks -b $BLOCK_SIZE -o /dev/null -p 0 -s -w $DEVICE
+	else
+		badblocks -b $BLOCK_SIZE -o /dev/null -p 0 -s -w $DEVICE 2>&1 | tee "$TMP/badblocks.output"
+		BADBLOCKS_STATUS=$?
+		local NOW=`date --rfc-3339=seconds`
+		if [ $BADBLOCKS_STATUS -eq 0 ]; then
+			echo "The badblocks erasure of \"$DEVICE\" completed successfully." >"$TMP"/complete.email
+			echo >>"$TMP"/complete.email
+			bdpurge_hail -c 100 "$TMP/badblocks.output" >>"$TMP"/complete.email
+			bdpurge_email $EMAIL "$HOSTNAME: bdpurge: badblocks of \"$DEVICE\" completed successfully at $NOW" "$TMP"/complete.email
+		else
+			echo "The badblocks erasure of \"$DEVICE\" failed." >"$TMP"/complete.email
+			echo >>"$TMP"/complete.email
+			bdpurge_hail -c 100 "$TMP/badblocks.output" >>"$TMP"/complete.email
+			bdpurge_email $EMAIL "$HOSTNAME: bdpurge: badblocks of \"$DEVICE\" failed at $NOW" "$TMP"/complete.email
+			return 1
+		fi
+	fi
 }
 
 # \brief Erase data at both ends of a block device
@@ -70,6 +134,96 @@ function bdpurge_erase_quickr
 	bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE"
 }
 
+# \brief Cleans up the environment and exits
+# \param $1 The exit code
+# \param $2 The exit message
+#
+# If DEBUG=true then temporary files are not deleted.
+function bdpurge_exit
+{
+	if [ "$EXITING" = "true" ]; then return; fi
+	EXITING=true
+	local EXIT="$1"
+	local MESSAGE="$2"
+	if [ "$EXIT" = "" ]; then
+		EXIT=0
+	fi
+	if [ "$MESSAGE" = "" ]; then
+		MESSAGE="An unrecoverable error has occurred"
+	fi
+	if ! $DEBUG; then
+		rm -rf "$TMP"
+	else
+		echo "Debug mode is enabled. Temporary files in \"$TMP\" will *not* be deleted."
+	fi
+	case $EXIT in
+		0) exit;;
+		*) echo "$CODENAME: $MESSAGE" >&2; exit $EXIT;;
+	esac
+}
+
+# \brief Calculates the greatest common divisor of $1 and $2
+# \param $1 The first number
+# \param $2 The second number
+function bdpurge_gcd
+{
+	local A=$1
+	local B=$2
+	local R=$2
+	while [ $R -ne 0 ]; do
+		R=$(( $A % $B ))
+		A=$B
+		B=$R
+	done
+	echo -n "$A"
+}
+
+# \brief Prints the first and last n lines from $1
+# \param $1 The file to read lines from
+function bdpurge_hail
+{
+	local HAIL_BYTES=false
+	local HAIL_LINES=10
+	
+	while [ $# -ne 0 ]; do
+		case "$1" in
+			"-c"|"--bytes")
+				HAIL_BYTES="$2"
+				shift 2
+				;;
+			"-n"|"--lines")
+				HAIL_LINES="$2"
+				shift 2
+				;;
+			*) break;;
+		esac
+	done
+	
+	if [ $# -eq 0 ]; then
+		echo "Usage:"
+		echo "$0 [file]"
+		return 1
+	fi
+	
+	if [ "$HAIL_BYTES" != "false" ]; then
+		if [ $(cat "$1" | wc -c) -gt $(( 2 * $HAIL_BYTES + 3 )) ]; then
+			head -c "$HAIL_BYTES" "$1"
+			echo -n "..."
+			tail -c "$HAIL_BYTES" "$1"
+		else
+			cat "$1"
+		fi
+	else
+		if [ $(cat "$1" | wc -l) -gt $(( 2 * $HAIL_LINES + 1 )) ]; then
+			head -n "$HAIL_LINES" "$1"
+			echo "..."
+			tail -n "$HAIL_LINES" "$1"
+		else
+			cat "$1"
+		fi
+	fi
+}
+
 # \brief Displays the help and exits the program
 function bdpurge_help
 {
@@ -81,16 +235,18 @@ function bdpurge_help
 	echo "  $CODENAME [options] BLOCK_DEVICE"
 	echo
 	echo "Options:"
+	echo "  -e, --email mail@example.com"
+	echo "    Send an email upon completion of the badblocks method."
 	echo "  -f, --force"
 	echo "    Erase the block device even if it is mounted."
 	echo "  -h, --help"
 	echo "    Display this help message and exit."
 	echo "  -m, --method quick"
-	echo "    Set the method used to erase the block device. Default is quick:"
+	echo "    Set the method used to erase the block device. Default is quickr:"
 	echo "      quick      Erase both ends of the device"
 	echo "      quickr     Erase both ends of each partition and the device"
 	#echo "      full       Write a sequence of zeros to the entire device"
-	#echo "      badblocks  Write 4 passes of 0xaa, 0x55, 0xff. and 0x00"
+	echo "      badblocks  Write 4 passes of 0xaa, 0x55, 0xff, and 0x00"
 	#echo "      scrub      Write multiple passes with data from /dev/urandom"
 	echo "  -n N"
 	echo "    Sets the niceness to N (default 0)."
@@ -110,36 +266,6 @@ function bdpurge_help
 	exit
 }
 
-# \brief Analyze a block device and display relevant information
-# \param $1 The device
-function bdpurge_analyze
-{
-	local DEVICE="$1"
-	
-	if [ ! -b "$DEVICE" ]; then
-		echo "error: \"$DEVICE\" is not a block device"
-		return 1
-	fi
-	if ! $FORCE && mount | grep "$DEVICE" >/dev/null; then
-		echo "error: \"$DEVICE\" is currently mounted"
-		return 2
-	fi
-	
-	local DEVICE_MODEL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Model Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
-	local DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
-	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
-	
-	echo "Device: $DEVICE"
-	if [ "$DEVICE_MODEL" != "" ]; then
-		echo "  Model Number: $DEVICE_MODEL"
-	fi
-	if [ "$DEVICE_SERIAL" != "" ]; then
-		echo "  Serial Number: $DEVICE_SERIAL"
-	fi
-	echo "  Size: $DEVICE_SIZE Bytes"
-}
-
-
 # \brief Erase data on a block device
 # \param $1 The device
 function bdpurge_main
@@ -147,9 +273,9 @@ function bdpurge_main
 	local DEVICE="$1"
 	
 	bdpurge_analyze "$DEVICE"
-	local ANALYSIS=$?
-	if [ $ANALYSIS -ne 0 ]; then
-		return $ANALYSIS
+	local ANALYZE_STATUS=$?
+	if [ $ANALYZE_STATUS -ne 0 ]; then
+		return $ANALYZE_STATUS
 	fi
 	
 	echo "Press CTRL+C to cancel"
@@ -169,9 +295,9 @@ function bdpurge_main
 		#"full")
 			#bdpurge_erase_full
 			#;;
-		#"badblocks")
-			#bdpurge_erase_badblocks
-			#;;
+		"badblocks")
+			bdpurge_erase_badblocks "$DEVICE"
+			;;
 		#"scrub")
 			#bdpurge_erase_scrub
 			#;;
@@ -189,17 +315,31 @@ function bdpurge_main
 }
 
 #------------------------------------------------------------------------------
+# hard coded variables
+
+NAME="bdpurge"
+CODENAME="bdpurge"
+COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
+LICENSE="GNU General Public License 2.0"
+VERSION="2.1.0.0"
+
+#------------------------------------------------------------------------------
 # default configuration
 #
+
+DEBUG=false
+EMAIL=""
 FORCE=false
-METHOD=quick
+METHOD=quickr
 NICE=0
 PRETEND=false
 PURGE_SIZE=16777216
+TMP="/tmp"
 
 #------------------------------------------------------------------------------
 # config files
 #
+
 if [ -r /etc/$CODENAME.conf ]; then
 	. /etc/$CODENAME.conf
 fi
@@ -219,6 +359,10 @@ fi
 THIS="$0"
 while [ $# -ne 0 ]; do
 	case "$1" in
+		"-e"|"--email")
+			EMAIL="$2"
+			shift 2
+			;;
 		"-f"|"--force")
 			FORCE=true
 			shift
@@ -227,7 +371,7 @@ while [ $# -ne 0 ]; do
 			bdpurge_help
 			exit
 			;;
-		"-m")
+		"-m"|"--method")
 			METHOD="$2"
 			shift 2
 			;;
@@ -266,6 +410,9 @@ DEVICE="$1"
 # prepare environment
 
 bdpurge_check_dependencies blockdev dd partprobe sleep
+trap bdpurge_exit EXIT SIGHUP SIGINT SIGQUIT SIGABRT SIGKILL SIGTERM
+TMP="$TMP/$CODENAME.$$"
+mkdir -p "$TMP"
 renice $NICE $$ >/dev/null
 
 #------------------------------------------------------------------------------
