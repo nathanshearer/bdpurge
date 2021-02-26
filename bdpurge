@@ -4,7 +4,7 @@ NAME="bdpurge"
 CODENAME="bdpurge"
 COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
-VERSION="2.2.1.0"
+VERSION="2.3.0.0"
 
 # \brief Analyze a block device and display relevant information
 # \param $1 The device
@@ -160,6 +160,38 @@ function bdpurge_erase_trim
 	fi
 }
 
+# \param $1 The device
+function bdpurge_erase_urandom
+{
+	local DEVICE="$1"
+	
+	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
+	local BLOCK_SIZE=$(bdpurge_gcd $((2**20)) $DEVICE_SIZE)
+	local BLOCK_COUNT=$(($DEVICE_SIZE/$BLOCK_SIZE))
+	
+	if $PRETEND; then
+		printf "%s\n" "dd if=/dev/urandom bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
+	else
+		dd if=/dev/urandom bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
+	fi
+}
+
+# \param $1 The device
+function bdpurge_erase_zero
+{
+	local DEVICE="$1"
+	
+	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
+	local BLOCK_SIZE=$(bdpurge_gcd $((2**20)) $DEVICE_SIZE)
+	local BLOCK_COUNT=$(($DEVICE_SIZE/$BLOCK_SIZE))
+	
+	if $PRETEND; then
+		printf "%s\n" "dd if=/dev/zero bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
+	else
+		dd if=/dev/zero bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
+	fi
+}
+
 # \brief Cleans up the environment and exits
 # \param $1 The exit code
 # \param $2 The exit message
@@ -269,12 +301,12 @@ function bdpurge_help
 	echo "    Display this help message and exit."
 	echo "  -m, --method quickr"
 	echo "    Set the method used to erase the block device. Default is quickr:"
+	echo "      badblocks  Write 4 passes of 0xaa, 0x55, 0xff, and 0x00"
 	echo "      quick      Erase both ends of the device"
 	echo "      quickr     Erase both ends of each partition and the device"
 	echo "      trim       Erase the entire device with the trim command"
-	#echo "      full       Write a sequence of zeros to the entire device"
-	echo "      badblocks  Write 4 passes of 0xaa, 0x55, 0xff, and 0x00"
-	#echo "      scrub      Write multiple passes with data from /dev/urandom"
+	echo "      urandom    Write 1 pass with data from /dev/urandom"
+	echo "      zero       Write 1 pass with data from /dev/zero"
 	echo "  -n, --nice N"
 	echo "    Sets the niceness to N (default 0)."
 	echo "  -p, --pretend"
@@ -313,6 +345,9 @@ function bdpurge_main
 	printf "\r0 ... \n"
 	
 	case "$METHOD" in
+		"badblocks")
+			bdpurge_erase_badblocks "$DEVICE"
+			;;
 		"quick")
 			bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE"
 			;;
@@ -322,15 +357,12 @@ function bdpurge_main
 		"trim")
 			bdpurge_erase_trim "$DEVICE" || exit
 			;;
-		#"full")
-			#bdpurge_erase_full
-			#;;
-		"badblocks")
-			bdpurge_erase_badblocks "$DEVICE"
+		"urandom")
+			bdpurge_erase_urandom "$DEVICE"
 			;;
-		#"scrub")
-			#bdpurge_erase_scrub
-			#;;
+		"zero")
+			bdpurge_erase_zero "$DEVICE"
+			;;
 		*)
 			echo "error: invalid method \"$METHOD\""
 			return 1
