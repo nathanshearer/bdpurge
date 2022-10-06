@@ -4,7 +4,7 @@ NAME="bdpurge"
 CODENAME="bdpurge"
 COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
-VERSION="2.3.0.0"
+VERSION="2.3.1.0"
 
 # \brief Analyze a block device and display relevant information
 # \param $1 The device
@@ -21,11 +21,28 @@ function bdpurge_analyze
 		return 2
 	fi
 	
-	local DEVICE_MODEL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Model Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
-	local DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/ *(.*?) */\1/')
+	local DEVICE_VENDOR=""
+	local DEVICE_PRODUCT=""
+	local DEVICE_MODEL=""
+	local DEVICE_SERIAL=""
+	for T in auto sat scsi; do
+		if [ "$DEVICE_VENDOR" = "" ]; then DEVICE_VENDOR=$(smartctl -d $T -i --json=g "$DEVICE" 2>/dev/null | grep json.scsi_vendor | sed -r -e 's/json.scsi_vendor = "(.*)";/\1/'); fi
+		if [ "$DEVICE_PRODUCT" = "" ]; then DEVICE_PRODUCT=$(smartctl -d $T -i --json=g "$DEVICE" 2>/dev/null | grep json.scsi_product | sed -r -e 's/json.scsi_product = "(.*)";/\1/'); fi
+		if [ "$DEVICE_MODEL" = "" ]; then DEVICE_MODEL=$(smartctl -d $T -i --json=g "$DEVICE" 2>/dev/null | grep json.model_name | sed -r -e 's/json.model_name = "(.*)";/\1/'); fi
+		if [ "$DEVICE_MODEL" = "" ]; then DEVICE_MODEL=$(smartctl -d $T -i --json=g "$DEVICE" 2>/dev/null | grep json.scsi_model_name | sed -r -e 's/json.scsi_model_name = "(.*)";/\1/'); fi
+		if [ "$DEVICE_SERIAL" = "" ]; then DEVICE_SERIAL=$(smartctl -d $T -i --json=g "$DEVICE" 2>/dev/null | grep json.serial_number | sed -r -e 's/json.serial_number = "(.*)";/\1/'); fi
+	done
+	if [ "$DEVICE_MODEL" = "" ]; then DEVICE_MODEL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Model Number' | cut -d ':' -f 2 | sed -r -e 's/[[:space:]]*([^[:space:]].*[^[:space:]])[[:space:]]*/\1/'); fi
+	if [ "$DEVICE_SERIAL" = "" ]; then DEVICE_SERIAL=$(hdparm -I "$DEVICE" 2>/dev/null | grep --text 'Serial Number' | cut -d ':' -f 2 | sed -r -e 's/[[:space:]]*([^[:space:]].*[^[:space:]])[[:space:]]*/\1/'); fi
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	
 	printf "%s\n" "Device: $DEVICE"
+	if [ "$DEVICE_VENDOR" != "" ]; then
+		printf "%s\n" "  Vendor: $DEVICE_VENDOR"
+	fi
+	if [ "$DEVICE_PRODUCT" != "" ]; then
+		printf "%s\n" "  Product: $DEVICE_PRODUCT"
+	fi
 	if [ "$DEVICE_MODEL" != "" ]; then
 		printf "%s\n" "  Model Number: $DEVICE_MODEL"
 	fi
@@ -45,6 +62,22 @@ function bdpurge_check_dependencies
 			exit
 		fi
 	done
+}
+
+# \brief Add a progress bar to dd if pv is available
+# \param $1 The size of the data in bytes
+# \param $2 The data source
+# bdpurge_ddifv 65536 /dev/zero of=/dev/null
+function bdpurge_ddifv
+{
+	local SIZE="$1"
+	local IF="$2"
+	shift 2
+	if type pv >/dev/null 2>/dev/null; then
+		pv -s "$SIZE" "$IF" | dd "$@" > /dev/null 2> /dev/null
+	else
+		dd if="$IF" "$@" > /dev/null 2> /dev/null
+	fi
 }
 
 # \brief Sends an email
@@ -98,30 +131,26 @@ function bdpurge_erase_quick
 	local DEVICE="$1"
 	local PURGE_SIZE="$2"
 	
-	echo -n "Erasing the first and last $PURGE_SIZE bytes on \"$DEVICE\"..."
+	echo "Erasing the first and last $PURGE_SIZE bytes on \"$DEVICE\"..."
 	
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	
 	if [ $(($PURGE_SIZE*2)) -ge "$DEVICE_SIZE" ]; then
 		if $PRETEND; then
 			echo
-			echo dd status=none if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE" >/dev/null 2>/dev/null
+			echo dd if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE"
 		else
-			dd status=none if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE" >/dev/null 2>/dev/null
+			bdpurge_ddifv $PURGE_SIZE /dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE"
 		fi
 	else
 		if $PRETEND; then
 			echo
-			echo dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
-			echo dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
+			echo dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
+			echo dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
 		else
-			dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
-			dd status=none if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
+			bdpurge_ddifv $PURGE_SIZE /dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
+			bdpurge_ddifv $PURGE_SIZE /dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
 		fi
-	fi
-	
-	if ! $PRETEND; then
-		echo " done."
 	fi
 }
 
@@ -170,9 +199,9 @@ function bdpurge_erase_urandom
 	local BLOCK_COUNT=$(($DEVICE_SIZE/$BLOCK_SIZE))
 	
 	if $PRETEND; then
-		printf "%s\n" "dd if=/dev/urandom bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
+		echo "dd if=/dev/urandom bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
 	else
-		dd if=/dev/urandom bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
+		bdpurge_ddifv $DEVICE_SIZE /dev/urandom bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
 	fi
 }
 
@@ -186,9 +215,9 @@ function bdpurge_erase_zero
 	local BLOCK_COUNT=$(($DEVICE_SIZE/$BLOCK_SIZE))
 	
 	if $PRETEND; then
-		printf "%s\n" "dd if=/dev/zero bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
+		echo "dd if=/dev/zero bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
 	else
-		dd if=/dev/zero bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
+		bdpurge_ddifv $DEVICE_SIZE /dev/zero bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
 	fi
 }
 

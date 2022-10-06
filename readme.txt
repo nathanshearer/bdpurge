@@ -31,6 +31,6 @@ Examples:
   bdpurge -r -p /dev/disk/by-id/ata-ST8000AS0002-1NA17Z_00000000
 
 Version:
-  bdpurge 2.3.0.0
+  bdpurge 2.3.1.0
   Copyright (C) 2016 Nathan Shearer
   Licensed under GNU General Public License 2.0
