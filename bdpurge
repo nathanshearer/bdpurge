@@ -4,7 +4,7 @@ NAME="bdpurge"
 CODENAME="bdpurge"
 COPYRIGHT="Copyright (C) 2016 Nathan Shearer"
 LICENSE="GNU General Public License 2.0"
-VERSION="2.3.1.0"
+VERSION="2.3.2.0"
 
 # \brief Analyze a block device and display relevant information
 # \param $1 The device
@@ -65,18 +65,22 @@ function bdpurge_check_dependencies
 }
 
 # \brief Add a progress bar to dd if pv is available
-# \param $1 The size of the data in bytes
-# \param $2 The data source
-# bdpurge_ddifv 65536 /dev/zero of=/dev/null
-function bdpurge_ddifv
+# \param $1 The input file or device
+# \param $2 The block size in bytes
+# \param $3 The number of blocks
+# \param $@ The rest of the arguments passed to dd
+# bdpurge_dd 65536 /dev/zero of=/dev/null
+function bdpurge_dd
 {
-	local SIZE="$1"
-	local IF="$2"
-	shift 2
+	local IF="$1"
+	local BS="$2"
+	local COUNT="$3"
+	shift 3
+
 	if type pv >/dev/null 2>/dev/null; then
-		pv -s "$SIZE" "$IF" | dd "$@" > /dev/null 2> /dev/null
+		dd iflag=fullblock if="$IF" bs="$BS" count="$COUNT" 2> /dev/null | pv -s $(($BS*$COUNT)) | dd iflag=fullblock bs="$BS" count="$COUNT" "$@" > /dev/null 2> /dev/null
 	else
-		dd if="$IF" "$@" > /dev/null 2> /dev/null
+		dd iflag=fullblock if="$IF" bs="$BS" count="$COUNT" "$@" > /dev/null 2> /dev/null
 	fi
 }
 
@@ -100,26 +104,22 @@ function bdpurge_erase_badblocks
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	local BLOCK_SIZE=$(bdpurge_gcd $((2**20)) $DEVICE_SIZE)
 	
-	if $PRETEND; then
-		printf "%s\n" "badblocks -b $BLOCK_SIZE -o /dev/null -p 0 -s -w $DEVICE"
+	badblocks -b $BLOCK_SIZE -o /dev/null -p 0 -s -w $DEVICE 2>&1 | tee "$TMP/badblocks.output" || return
+	BADBLOCKS_STATUS=$?
+	local NOW=$(date --rfc-3339=seconds)
+	if [ $BADBLOCKS_STATUS -eq 0 ]; then
+		printf "%s\n\n" "The badblocks erasure of \"$DEVICE\" completed successfully." >"$TMP"/complete.email
+		bdpurge_analyze "$DEVICE" >>"$TMP"/complete.email
+		cat "$TMP/badblocks.output" | sed -r -e 's/^.*\r(.*)$/\1/' >"$TMP/badblocks.output2"
+		bdpurge_hail -n 100 "$TMP/badblocks.output2" >>"$TMP"/complete.email
+		bdpurge_email $EMAIL "$HOSTNAME: bdpurge: badblocks of \"$DEVICE\" completed successfully at $NOW" "$TMP"/complete.email
 	else
-		badblocks -b $BLOCK_SIZE -o /dev/null -p 0 -s -w $DEVICE 2>&1 | tee "$TMP/badblocks.output"
-		BADBLOCKS_STATUS=$?
-		local NOW=$(date --rfc-3339=seconds)
-		if [ $BADBLOCKS_STATUS -eq 0 ]; then
-			printf "%s\n\n" "The badblocks erasure of \"$DEVICE\" completed successfully." >"$TMP"/complete.email
-			bdpurge_analyze "$DEVICE" >>"$TMP"/complete.email
-			cat "$TMP/badblocks.output" | sed -r -e 's/^.*\r(.*)$/\1/' >"$TMP/badblocks.output2"
-			bdpurge_hail -n 100 "$TMP/badblocks.output2" >>"$TMP"/complete.email
-			bdpurge_email $EMAIL "$HOSTNAME: bdpurge: badblocks of \"$DEVICE\" completed successfully at $NOW" "$TMP"/complete.email
-		else
-			printf "%s\n\n" "The badblocks erasure of \"$DEVICE\" failed." >"$TMP"/complete.email
-			bdpurge_analyze "$DEVICE" >>"$TMP"/complete.email
-			cat "$TMP/badblocks.output" | sed -r -e 's/^.*\r(.*)$/\1/' >"$TMP/badblocks.output2"
-			bdpurge_hail -n 100 "$TMP/badblocks.output2" >>"$TMP"/complete.email
-			bdpurge_email $EMAIL "$HOSTNAME: bdpurge: badblocks of \"$DEVICE\" failed at $NOW" "$TMP"/complete.email
-			return 1
-		fi
+		printf "%s\n\n" "The badblocks erasure of \"$DEVICE\" failed." >"$TMP"/complete.email
+		bdpurge_analyze "$DEVICE" >>"$TMP"/complete.email
+		cat "$TMP/badblocks.output" | sed -r -e 's/^.*\r(.*)$/\1/' >"$TMP/badblocks.output2"
+		bdpurge_hail -n 100 "$TMP/badblocks.output2" >>"$TMP"/complete.email
+		bdpurge_email $EMAIL "$HOSTNAME: bdpurge: badblocks of \"$DEVICE\" failed at $NOW" "$TMP"/complete.email
+		return 1
 	fi
 }
 
@@ -136,21 +136,10 @@ function bdpurge_erase_quick
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	
 	if [ $(($PURGE_SIZE*2)) -ge "$DEVICE_SIZE" ]; then
-		if $PRETEND; then
-			echo
-			echo dd if=/dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE"
-		else
-			bdpurge_ddifv $PURGE_SIZE /dev/zero bs=512 count=$(($DEVICE_SIZE/512)) of="$DEVICE"
-		fi
+		bdpurge_dd /dev/zero 512 $(($DEVICE_SIZE/512)) of="$DEVICE" || return
 	else
-		if $PRETEND; then
-			echo
-			echo dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
-			echo dd if=/dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
-		else
-			bdpurge_ddifv $PURGE_SIZE /dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE"
-			bdpurge_ddifv $PURGE_SIZE /dev/zero bs=512 count=$(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512))))
-		fi
+		bdpurge_dd /dev/zero 512 $(($PURGE_SIZE/512)) of="$DEVICE" || return
+		bdpurge_dd /dev/zero 512 $(($PURGE_SIZE/512)) of="$DEVICE" seek=$(($(($DEVICE_SIZE/512))-$(($PURGE_SIZE/512)))) || return
 	fi
 }
 
@@ -165,9 +154,9 @@ function bdpurge_erase_quickr
 	for PARTITION in "$DEVICE"[0-9]* "$DEVICE"p[0-9]*; do
 		if [ "$PARTITION" = "${DEVICE}[0-9]*" ]; then continue; fi
 		if [ "$PARTITION" = "${DEVICE}p[0-9]*" ]; then continue; fi
-		bdpurge_erase_quick "$PARTITION" "$PURGE_SIZE"
+		bdpurge_erase_quick "$PARTITION" "$PURGE_SIZE" || return
 	done
-	bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE"
+	bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE" || return
 }
 
 # \brief Erase the entire device with the trim command
@@ -180,13 +169,8 @@ function bdpurge_erase_trim
 	
 	local DEVICE_SIZE=$(blockdev --getsize64 "$DEVICE")
 	
-	if $PRETEND; then
-		echo
-		echo blkdiscard "$DEVICE"
-	else
-		blkdiscard "$DEVICE" || return
-		echo "done."
-	fi
+	blkdiscard "$DEVICE" || return
+	echo "done."
 }
 
 # \param $1 The device
@@ -198,11 +182,7 @@ function bdpurge_erase_urandom
 	local BLOCK_SIZE=$(bdpurge_gcd $((2**20)) $DEVICE_SIZE)
 	local BLOCK_COUNT=$(($DEVICE_SIZE/$BLOCK_SIZE))
 	
-	if $PRETEND; then
-		echo "dd if=/dev/urandom bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
-	else
-		bdpurge_ddifv $DEVICE_SIZE /dev/urandom bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
-	fi
+	bdpurge_dd /dev/urandom $BLOCK_SIZE $BLOCK_COUNT of="$DEVICE" || return
 }
 
 # \param $1 The device
@@ -214,11 +194,7 @@ function bdpurge_erase_zero
 	local BLOCK_SIZE=$(bdpurge_gcd $((2**20)) $DEVICE_SIZE)
 	local BLOCK_COUNT=$(($DEVICE_SIZE/$BLOCK_SIZE))
 	
-	if $PRETEND; then
-		echo "dd if=/dev/zero bs=$BLOCK_SIZE conv=sync of=$DEVICE count=$BLOCK_COUNT"
-	else
-		bdpurge_ddifv $DEVICE_SIZE /dev/zero bs=$BLOCK_SIZE conv=sync of="$DEVICE" count=$BLOCK_COUNT
-	fi
+	bdpurge_dd /dev/zero $BLOCK_SIZE $BLOCK_COUNT of="$DEVICE" || return
 }
 
 # \brief Cleans up the environment and exits
@@ -338,9 +314,6 @@ function bdpurge_help
 	echo "      zero       Write 1 pass with data from /dev/zero"
 	echo "  -n, --nice N"
 	echo "    Sets the niceness to N (default 0)."
-	echo "  -p, --pretend"
-	echo "    Performs a dry run and prints out what purge commands would be performed."
-	echo "    Data is not actually purged."
 	echo "  -s, --size 16777216"
 	echo "    The amount of data to erase at both ends of the block device."
 	echo
@@ -375,22 +348,22 @@ function bdpurge_main
 	
 	case "$METHOD" in
 		"badblocks")
-			bdpurge_erase_badblocks "$DEVICE"
+			bdpurge_erase_badblocks "$DEVICE" || return
 			;;
 		"quick")
-			bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE"
+			bdpurge_erase_quick "$DEVICE" "$PURGE_SIZE" || return
 			;;
 		"quickr")
-			bdpurge_erase_quickr "$DEVICE" "$PURGE_SIZE"
+			bdpurge_erase_quickr "$DEVICE" "$PURGE_SIZE" || return
 			;;
 		"trim")
-			bdpurge_erase_trim "$DEVICE" || exit
+			bdpurge_erase_trim "$DEVICE" || return
 			;;
 		"urandom")
-			bdpurge_erase_urandom "$DEVICE"
+			bdpurge_erase_urandom "$DEVICE" || return
 			;;
 		"zero")
-			bdpurge_erase_zero "$DEVICE"
+			bdpurge_erase_zero "$DEVICE" || return
 			;;
 		*)
 			echo "error: invalid method \"$METHOD\""
@@ -398,11 +371,7 @@ function bdpurge_main
 			;;
 	esac
 	
-	if $PRETEND; then
-		echo partprobe "$DEVICE"
-	else
-		partprobe "$DEVICE"
-	fi
+	partprobe "$DEVICE"
 }
 
 #------------------------------------------------------------------------------
@@ -413,7 +382,6 @@ EMAIL=""
 FORCE=false
 METHOD=quickr
 NICE=0
-PRETEND=false
 PURGE_SIZE=16777216
 TMP="/tmp"
 
@@ -457,10 +425,6 @@ while [ $# -ne 0 ]; do
 		"-n"|"--nice")
 			NICE="$2"
 			shift 2
-			;;
-		"-p"|"--pretend")
-			PRETEND=true
-			shift
 			;;
 		"-s"|"--size")
 			PURGE_SIZE="$2"
